@@ -1,17 +1,15 @@
 {
   "name": "php-interpreter",
   "main": "./lib/php-interpreter",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "A short description of your package",
-  "keywords": [
-  ],
+  "keywords": [],
   "repository": "https://github.com/twifty/atom-php-interpreter.git",
   "license": "MIT",
   "engines": {
     "atom": ">=1.0.0 <2.0.0"
   },
-  "dependencies": {
-  },
+  "dependencies": {},
   "devDependencies": {
     "babel-eslint": "^8.2.2",
     "eslint": "^4.19.1",
