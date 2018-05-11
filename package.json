@@ -1,17 +1,26 @@
 {
   "name": "php-interpreter",
-  "main": "./lib/php-interpreter",
+  "main": "./main",
   "version": "0.0.1",
-  "description": "A short description of your package",
+  "description": "Coming Soon. Not ready for use! A Remote PHP interpreter intended for use within Docker containers.",
   "keywords": [],
-  "repository": "https://github.com/twifty/atom-php-interpreter.git",
+  "repository": "git@github.com:twifty/atom-php-interpreter.git",
   "license": "MIT",
   "engines": {
     "atom": ">=1.0.0 <2.0.0"
   },
-  "dependencies": {},
+  "package-deps": [
+    "shared-settings:0.0.5"
+  ],
+  "dependencies": {
+    "atom-package-deps": "~4.5.0"
+  },
   "devDependencies": {
     "babel-eslint": "^8.2.2",
+    "babel-preset-env": "^1.7.0",
+    "babel-register": "^6.26.0",
+    "chalk": "^2.4.1",
+    "commander": "^2.15.1",
     "eslint": "^4.19.1",
     "eslint-plugin-babel": "^4.1.2",
     "eslint-plugin-react": "^7.7.0"
