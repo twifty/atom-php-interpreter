@@ -1,73 +1,137 @@
-'use babel';
+/** @babel */
+/* global console describe beforeEach afterEach it expect forMethodCall __dirname */
 
-import PhpInterpreter from '../lib/php-interpreter';
+import PhpClient from '../lib/php-client'
+import { COMMANDS } from '../lib/commands'
+import { signalCode } from '../lib/util'
+import * as Helper from './spec-helpers'
 
-// Use the command `window:run-package-specs` (cmd-alt-ctrl-p) to run specs.
-//
-// To run a specific `it` or `describe` block add an `f` to the front (e.g. `fit`
-// or `fdescribe`). Remove the `f` to unfocus the block.
+const SERVER_HOST = '127.0.0.1'
+const SERVER_PORT = 1024
+
+const Decorated = Helper.makeMethodWaitable(PhpClient, '_handleResponse')
+
+let client
 
 describe('PhpInterpreter', () => {
-  let workspaceElement, activationPromise;
+    describe('::_send', () => {
+        beforeEach(async () => {
+            await Helper.startServer(SERVER_HOST, SERVER_PORT).then(() => {
+                client = new Decorated({
+                    host: SERVER_HOST,
+                    port: SERVER_PORT,
+                    debug: false
+                })
 
-  beforeEach(() => {
-    workspaceElement = atom.views.getView(atom.workspace);
-    activationPromise = atom.packages.activatePackage('php-interpreter');
-  });
+                client.on('error', (err) => {
+                    console.log('Caught error');
+                    console.log(err);
+                })
+            })
+        })
 
-  describe('when the php-interpreter:toggle event is triggered', () => {
-    it('hides and shows the modal panel', () => {
-      // Before the activation event the view is not on the DOM, and no panel
-      // has been created
-      expect(workspaceElement.querySelector('.php-interpreter')).not.toExist();
+        afterEach(async () => {
+            await Helper.stopServer()
+        })
 
-      // This is an activation event, triggering it will cause the package to be
-      // activated.
-      atom.commands.dispatch(workspaceElement, 'php-interpreter:toggle');
+        it('can set the working directory', async () => {
+            client.setCwd(__dirname)
 
-      waitsForPromise(() => {
-        return activationPromise;
-      });
+            const responseSpy = await forMethodCall(client, '_handleResponse')
 
-      runs(() => {
-        expect(workspaceElement.querySelector('.php-interpreter')).toExist();
+            expect(responseSpy.calls.argsFor(0)).toEqual([COMMANDS.CMD_SET_CWD, __dirname])
+        })
 
-        let phpInterpreterElement = workspaceElement.querySelector('.php-interpreter');
-        expect(phpInterpreterElement).toExist();
+        it('can set and get env vars', async () => {
+            client.setEnv('TEMP_ENV_VAR', 'Hello World!')
+            client._send('CMD_GET_ENV')
 
-        let phpInterpreterPanel = atom.workspace.panelForItem(phpInterpreterElement);
-        expect(phpInterpreterPanel.isVisible()).toBe(true);
-        atom.commands.dispatch(workspaceElement, 'php-interpreter:toggle');
-        expect(phpInterpreterPanel.isVisible()).toBe(false);
-      });
-    });
+            const responseSpy = await forMethodCall(client, '_handleResponse', 2)
 
-    it('hides and shows the view', () => {
-      // This test shows you an integration test testing at the view level.
+            expect(responseSpy.calls.argsFor(0)[0]).toEqual(COMMANDS.CMD_SET_ENV)
+            expect(responseSpy.calls.argsFor(0)[1]).toEqualJson({
+                TEMP_ENV_VAR: "Hello World!"
+            })
 
-      // Attaching the workspaceElement to the DOM is required to allow the
-      // `toBeVisible()` matchers to work. Anything testing visibility or focus
-      // requires that the workspaceElement is on the DOM. Tests that attach the
-      // workspaceElement to the DOM are generally slower than those off DOM.
-      jasmine.attachToDOM(workspaceElement);
+            expect(client.stdout.read().toString()).toEqualJson({
+                TEMP_ENV_VAR: "Hello World!"
+            })
+        })
 
-      expect(workspaceElement.querySelector('.php-interpreter')).not.toExist();
+        it('can unset a single env var', async () => {
+            client.setEnv({
+                TEMP_ENV_VAR: "Hello World!"
+            })
+            client.setEnv('TEMP_ENV_VAR', null)
 
-      // This is an activation event, triggering it causes the package to be
-      // activated.
-      atom.commands.dispatch(workspaceElement, 'php-interpreter:toggle');
+            const responseSpy = await forMethodCall(client, '_handleResponse', 2)
 
-      waitsForPromise(() => {
-        return activationPromise;
-      });
+            expect(responseSpy.calls.argsFor(0)[0]).toEqual(COMMANDS.CMD_SET_ENV)
+            expect(responseSpy.calls.argsFor(0)[1]).toEqualJson({
+                TEMP_ENV_VAR: "Hello World!"
+            })
 
-      runs(() => {
-        // Now we can test for view visibility
-        let phpInterpreterElement = workspaceElement.querySelector('.php-interpreter');
-        expect(phpInterpreterElement).toBeVisible();
-        atom.commands.dispatch(workspaceElement, 'php-interpreter:toggle');
-        expect(phpInterpreterElement).not.toBeVisible();
-      });
-    });
-  });
+            expect(responseSpy.calls.argsFor(1)[0]).toEqual(COMMANDS.CMD_SET_ENV)
+            expect(responseSpy.calls.argsFor(1)[1]).toEqualJson({})
+        })
+
+        it('can poke the server', async () => {
+            client._send('CMD_ARE_YOU_THERE')
+
+            await forMethodCall(client, '_handleResponse')
+
+            expect(client.stdout.read().toString()).toEqual('Poke me again! I dare you!!!\n')
+        })
+
+        it('can run a command', async () => {
+            client.execute('php -r "echo \'hello world!\';"')
+
+            const responseSpy = await forMethodCall(client, '_handleResponse', 3)
+
+            expect(responseSpy.calls.argsFor(0)[0]).toEqual(COMMANDS.CMD_PROCESS_EXECUTE)
+            expect(responseSpy.calls.argsFor(0)[1]).toMatch(/^\d+$/)
+
+            expect(client.stdout.read().toString()).toEqual('hello world!')
+
+            expect(responseSpy.calls.argsFor(2)[0]).toEqual(COMMANDS.CMD_PROCESS_EXITCODE)
+            expect(responseSpy.calls.argsFor(2)[1]).toEqual('0')
+        })
+
+        it('can write to stdin before running a command', async () => {
+            client.stdin.write('hello world!\n')
+            client.execute("php -r \"echo trim(fgets(STDIN));\"")
+
+            const responseSpy = await forMethodCall(client, '_handleResponse', 2)
+
+            expect(responseSpy.calls.argsFor(0)[0]).toEqual(COMMANDS.CMD_PROCESS_EXECUTE)
+            expect(responseSpy.calls.argsFor(0)[1]).toMatch(/^\d+$/)
+
+            expect(client.stdout.read().toString()).toEqual('hello world!')
+        })
+
+        it('can write to stdin of a running process', async () => {
+            client.execute("php -r \"echo trim(fgets(STDIN));\"")
+            client.stdin.write('hello world!\n')
+
+            const responseSpy = await forMethodCall(client, '_handleResponse', 2)
+
+            expect(responseSpy.calls.argsFor(0)[0]).toEqual(COMMANDS.CMD_PROCESS_EXECUTE)
+            expect(responseSpy.calls.argsFor(0)[1]).toMatch(/^\d+$/)
+
+            expect(client.stdout.read().toString()).toEqual('hello world!')
+        })
+
+        it('can signal a running process', async () => {
+            client.execute("php -r \"echo trim(fgets(STDIN));\"")
+            client.kill('SIGKILL')
+
+            const responseSpy = await forMethodCall(client, '_handleResponse', 2)
+
+            expect(responseSpy.calls.argsFor(0)[0]).toEqual(COMMANDS.CMD_PROCESS_EXECUTE)
+            expect(responseSpy.calls.argsFor(0)[1]).toMatch(/^\d+$/)
+
+            expect(responseSpy.calls.argsFor(1)[0]).toEqual(COMMANDS.CMD_PROCESS_SIGNAL)
+            expect(responseSpy.calls.argsFor(1)[1]).toEqual(signalCode('SIGKILL').toString())
+        })
+    })
 });

@@ -31,6 +31,20 @@ class Interpreter implements CommandsInterface
     private $debug;
 
     /**
+     * The maximum time a process can run, in seconds.
+     *
+     * @var float|null
+     */
+    private $timeout;
+
+    /**
+     * The time the current process start.
+     *
+     * @var float
+     */
+    private $startTime;
+
+    /**
      * The PHP process path
      *
      * @var string
@@ -101,7 +115,7 @@ class Interpreter implements CommandsInterface
      * @return bool         TRUE if is a command
      */
     public static function isCommand (string $char): bool {
-        return isset(self::COMMAND_NAMES[ord($char)]);
+        return 1 === strlen($char) && isset(self::COMMAND_NAMES[ord($char)]);
     }
 
     /**
@@ -112,8 +126,7 @@ class Interpreter implements CommandsInterface
      * @return bool         TRUE if is the IAC byte
      */
     public static function isEscape (string $char): bool {
-        // TODO are null chars present
-        return self::CMD_ESCAPE === ord($char);
+        return 1 === strlen($char) && self::CMD_ESCAPE === ord($char);
     }
 
     /**
@@ -122,9 +135,10 @@ class Interpreter implements CommandsInterface
      * @param ServerSocket $socket The client socket
      * @param boolean      $debug  TRUE if messages should be written to client
      */
-    public function __construct (ServerSocket $socket, bool $debug = false) {
+    public function __construct (ServerSocket $socket, bool $debug = false, ?float $timeout = null) {
         $this->socket = $socket;
         $this->debug = $debug;
+        $this->timeout = $timeout;
         $this->binary = null;
         $this->process = null;
         $this->background = [];
@@ -216,9 +230,10 @@ class Interpreter implements CommandsInterface
     /**
      * Writes a binary string back to the socket
      *
-     * @param  string $data The data to be written
+     * @param  int    $command The response command
+     * @param  string $data    The data to be written
      */
-    private function write (string $data, int $command = self::CMD_PROCESS_STDOUT) {
+    private function write (int $command, string $data) {
         $escape = chr(self::CMD_ESCAPE);
 
         $rawData = implode('', [
@@ -235,44 +250,6 @@ class Interpreter implements CommandsInterface
     }
 
     /**
-     * Checks the state of the running and background processes.
-     */
-    public function tick () {
-        if ($this->process) {
-            if ('' !== $stdout = $this->process->getIncrementalOutput()) {
-                $this->write($stdout, self::CMD_PROCESS_STDOUT);
-            }
-
-            if ('' !== $stderr = $this->process->getIncrementalErrorOutput()) {
-                $this->write($stderr, self::CMD_PROCESS_STDERR);
-            }
-
-            if (!$this->process->isRunning()) {
-                $this->write($this->process->getExitCode(), self::CMD_PROCESS_EXITCODE);
-
-                $this->input->close();
-
-                $this->input = null;
-                $this->process = null;
-            }
-        }
-
-        $this->background = array_filter($this->background, function($process) {
-            if (!$process->isRunning()) {
-                $process->getInput()->close();
-
-                return false;
-            }
-
-            return true;
-        });
-
-        if ($this->process || !empty($this->background)) {
-            Loop::defer([$this, 'tick']);
-        }
-    }
-
-    /**
      * Executes a command passed over the socket.
      *
      * @param  int         $command One of the CMD_ constants
@@ -282,9 +259,14 @@ class Interpreter implements CommandsInterface
         switch ($command) {
             case self::CMD_PROCESS_EXECUTE:
                 if (isset($this->process)) {
-                    $this->write('A process is already running!', self::CMD_PROCESS_STDERR);
+                    $this->write(self::CMD_PROCESS_STDERR, 'A process is already running!');
                 } else {
-                    $this->createProcess($data);
+                    try {
+                        $this->createProcess($data);
+                    } catch (\Exception $ex) {
+                        $this->write(self::CMD_PROCESS_STDERR, (string)$ex);
+                    }
+                    $this->write(self::CMD_PROCESS_EXECUTE, strval($this->process->getPid()));
                 }
                 break;
 
@@ -297,36 +279,47 @@ class Interpreter implements CommandsInterface
 
             case self::CMD_PROCESS_KILL:
                 if (isset($this->process)) {
-                    $this->process->signal('SIGKILL');
+                    $this->process->signal(SIGKILL);
                 }
                 break;
 
             case self::CMD_PROCESS_INTERUPT:
                 if (isset($this->process)) {
-                    $this->process->signal('SIGINT');
+                    $this->process->signal(SIGINT);
+                }
+                break;
+
+            case self::CMD_PROCESS_SIGNAL:
+                if (isset($this->process)) {
+                    $this->process->signal(intval($data));
                 }
                 break;
 
             case self::CMD_ABORT_OUTPUT:
                 if (isset($this->process)) {
-                    array_push($this->background, $this->process);
+                    $pid = $this->process->getPid();
+
+                    $this->background[$pid] = $this->process;
 
                     $this->input->close();
 
                     $this->input = null;
                     $this->process = null;
+
+                    $this->write(self::CMD_ABORT_OUTPUT, $pid);
                 }
                 break;
 
             case self::CMD_ARE_YOU_THERE:
-                $this->write('Poke me again! I dare you!!!'."\n");
+                $this->write(self::CMD_PROCESS_STDOUT, 'Poke me again! I dare you!!!'."\n");
                 break;
 
             case self::CMD_SET_CWD:
                 if (!is_string($data) || !is_dir($data)) {
-                    $this->write('The directory "'.$data.'" doesn\'t exist!', self::CMD_PROCESS_STDERR);
+                    $this->write(self::CMD_PROCESS_STDERR, 'The directory "'.$data.'" doesn\'t exist!');
                 } else {
                     $this->cwd = $data;
+                    $this->write(self::CMD_SET_CWD, $data);
                 }
                 break;
 
@@ -337,11 +330,15 @@ class Interpreter implements CommandsInterface
                 if (is_string($data)) {
                     if ('{' !== $data[0]) {
                         $all = false;
-                        $pair = explode('=', $data, 2);
+                        $pair = array_map('trim', explode('=', $data, 2));
                         if (2 === count($pair)) {
                             $vars = [];
-                            if ('null' === strtolower($pair[1])) {
+                            if (null === $pair[1] || 'null' === strtolower($pair[1])) {
                                 unset($this->env[$pair[0]]);
+                            } else if (preg_match('/^"[^"\\\\]*(?:\\\\.[^"\\\\]*)*"$/s', $pair[1])) {
+                                $vars[$pair[0]] = str_replace('\\"', '"', substr($pair[1], 1, -1));
+                            } else if (preg_match("/^'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'$/s", $pair[1])) {
+                                $vars[$pair[0]] = str_replace("\\'", "'", substr($pair[1], 1, -1));
                             } else {
                                 $vars[$pair[0]] = $pair[1];
                             }
@@ -357,14 +354,15 @@ class Interpreter implements CommandsInterface
                     } else {
                         $this->env = array_merge($this->env, $vars);
                     }
+                    $this->write(self::CMD_SET_ENV, json_encode($this->env, JSON_UNESCAPED_UNICODE | JSON_FORCE_OBJECT));
                 } else {
-                    $this->write('Malformed env variable "'.$data.'"!', self::CMD_PROCESS_STDERR);
+                    $this->write(self::CMD_PROCESS_STDERR, 'Malformed env variable "'.$data.'"!');
                 }
                 break;
 
             case self::CMD_GET_ENV:
-                $data = json_encode($this->env, JSON_UNESCAPED_UNICODE);
-                $this->write($data);
+                $data = json_encode($this->env, JSON_UNESCAPED_UNICODE | JSON_FORCE_OBJECT);
+                $this->write(self::CMD_PROCESS_STDOUT, $data);
                 break;
 
             default:
@@ -380,19 +378,24 @@ class Interpreter implements CommandsInterface
      *
      * @return Process
      */
-    private function createProcess (string $parameters): Process {
+    private function createProcess (string $commandLine): Process {
         if (isset($this->process)) {
             throw new \RuntimeException('A process is already running.');
         }
-        $arguments = explode(' ', $parameters);
 
-        if ('php' === $arguments[0]) {
-            $arguments[0] = $this->getBinary();
-        } else {
-            array_unshift($arguments, $this->getBinary());
+        $binary = $this->getBinary();
+        $length = strlen($binary);
+
+        if (0 === strncmp($commandLine, 'php ', 4) && 'php' !== $binary) {
+            $commandLine = $binary.substr($commandLine, 3);
         }
 
-        $this->process = new Process($arguments, $this->cwd, $this->env);
+        $this->startTime = microtime(true);
+        $this->process = new Process($commandLine, $this->cwd, $this->env);
+
+        if (null !== $this->timeout) {
+            $this->process->setTimeout($this->timeout);
+        }
 
         if (!isset($this->input)) {
             $this->input = new InputStream();
@@ -401,9 +404,51 @@ class Interpreter implements CommandsInterface
         $this->process->setInput($this->input);
         $this->process->start();
 
-        Loop::defer([$this, 'tick']);
+        Loop::defer(\Closure::fromCallable([$this, 'tick']));
 
         return $this->process;
+    }
+
+    /**
+     * Checks the state of the running and background processes.
+     */
+    private function tick () {
+        if ($this->process) {
+            if ('' !== $stdout = $this->process->getIncrementalOutput()) {
+                $this->write(self::CMD_PROCESS_STDOUT, $stdout);
+            }
+
+            if ('' !== $stderr = $this->process->getIncrementalErrorOutput()) {
+                $this->write(self::CMD_PROCESS_STDERR, $stderr);
+            }
+
+            if ($this->process->isRunning() && null !== $this->timeout) {
+                if ($this->timeout < microtime(true) - $this->startTime) {
+                    $this->process->signal(SIGKILL);
+                }
+            }
+
+            if (!$this->process->isRunning()) {
+                if ($this->process->hasBeenSignaled()) {
+                    $this->write(self::CMD_PROCESS_SIGNAL, $this->process->getTermSignal());
+                } else {
+                    $this->write(self::CMD_PROCESS_EXITCODE, $this->process->getExitCode());
+                }
+
+                $this->input->close();
+
+                $this->input = null;
+                $this->process = null;
+            }
+        }
+
+        $this->background = array_filter($this->background, function($process) {
+            return $process->isRunning();
+        });
+
+        if ($this->process || !empty($this->background)) {
+            Loop::defer(\Closure::fromCallable([$this, 'tick']));
+        }
     }
 
     /**

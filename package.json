@@ -9,16 +9,19 @@
   "engines": {
     "atom": ">=1.0.0 <2.0.0"
   },
+  "atomTestRunner": "atom-jasmine2-test-runner",
   "package-deps": [
-    "shared-settings:0.0.5"
+    "shared-settings:0.0.6"
   ],
   "dependencies": {
     "atom-package-deps": "~4.5.0"
   },
   "devDependencies": {
+    "@babel/core": "^7.0.0-beta.46",
+    "@babel/preset-env": "^7.0.0-beta.46",
+    "@babel/register": "^7.0.0-beta.46",
+    "atom-jasmine2-test-runner": "^2.99.1",
     "babel-eslint": "^8.2.2",
-    "babel-preset-env": "^1.7.0",
-    "babel-register": "^6.26.0",
     "chalk": "^2.4.1",
     "commander": "^2.15.1",
     "eslint": "^4.19.1",

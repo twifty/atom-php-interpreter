@@ -1,64 +1,116 @@
 /** @babel */
-/* global process console */
+/* global process console Promise */
 
 import cli from 'commander'
 import util from 'util'
 import chalk from 'chalk'
-import PhpClient from '../lib/php-client'
+import PhpService from '../lib/php-service'
 
 function print (format, ...args) {
     process.stdout.write(util.format(format, ...args));
 }
 
-function runCommand (command, args, host, port) {
-    const server = PhpClient.startServer(host, port, cli.debugServer)
-
-    server.on('error', (error) => {
-        console.error(error)
-        server.kill()
-    })
-
-    if (cli.debugServer) {
-        server.stdout.on('data', (data) => {
-            print(chalk.gray(data.toString()))
-        })
-
-        server.stderr.on('data', (data) => {
-            print(chalk.bgCyanBright.gray(data.toString()))
-        })
-    }
-
-    server.on('connected', () => {
-        const client = PhpClient.spawnClient(command, args, {
-            cwd: '.',
-            debug: cli.debugClient,
-            host,
-            port
-        })
-
-        client.on('close', (code, signal) => {
-            if (cli.debugClient) {
-                print(chalk.green(`Closed: code %s, signal %s\n`), code, signal)
-            }
-
-            // Server is designed to always run
-            server.kill()
-        })
-
-        client.on('error', (error) => {
+function startServer (host, port, useExisting) {
+    return PhpService.startServer(host, port, cli.debugServer).then((server) => {
+        server.on('error', (error) => {
             console.error(error)
             server.kill()
         })
 
-        client.stdout.on('data', (data) => {
-            print(data.toString())
+        server.on('exit', () => {
+            if (cli.debugServer) {
+                print('Stopped server.\n')
+            }
         })
 
-        client.stderr.on('data', (data) => {
-            print(chalk.bgCyan(data.toString()))
-        })
+        if (cli.debugServer) {
+            server.stdout.on('data', (data) => {
+                print(chalk.gray(data.toString()))
+            })
+
+            server.stderr.on('data', (data) => {
+                print(chalk.bgCyanBright.gray(data.toString()))
+            })
+        }
+    }, (err) => {
+        if (1 === err.exitCode) {
+            if (useExisting) {
+                if (cli.debugServer) {
+                    print('Using existing server instance.\n')
+                }
+            } else {
+                print(chalk.red('An instance of the server is already running.\n'))
+                print(chalk.cyan('    Invoke `cli stop` to terminate the running instance.\n'))
+                print(chalk.cyan('    Invoke `cli run <script>` to use the running instance.\n'))
+                process.exit(err.exitCode)
+            }
+        } else if (!useExisting) {
+            print(chalk.bgCyan(err))
+            process.exit(err.exitCode)
+        }
+
+        // Note, output of the server will not be available
+        return Promise.resolve()
     })
+}
 
+function runCommand (command, args, host, port) {
+    if ('stop' === command) {
+        return PhpService.stopServer().then(({message}) => {
+            if (message) {
+                console.log(message);
+            }
+        })
+    }
+
+    let match = null
+    if (!command || (match = command.match(/^(start|run|php)/))) {
+        let useExisting = false
+
+        if ('run' === match[0]) {
+            useExisting = true
+            command = command.substr(3).trim()
+        }
+
+        startServer(host, port, useExisting).then((server) => {
+            if (match && match[0] !== 'start') {
+                const client = PhpService.spawnClient(command, args, {
+                    cwd: '.',
+                    debug: cli.debugClient,
+                    host,
+                    port
+                })
+
+                client.on('close', (code, signal) => {
+                    if (cli.debugClient) {
+                        print(chalk.green(`Closed: code %s, signal %s\n`), code, signal)
+                    }
+
+                    // Server is designed to always run
+                    if (server) {
+                        server.kill()
+                    }
+
+                    process.exit(code || 0)
+                })
+
+                client.on('error', (error) => {
+                    console.error(error)
+                    if (server) {
+                        server.kill()
+                    }
+                })
+
+                client.stdout.on('data', (data) => {
+                    print(data.toString())
+                })
+
+                client.stderr.on('data', (data) => {
+                    print(chalk.bgCyan(data.toString()))
+                })
+            }
+        })
+    }
 }
 
 cli

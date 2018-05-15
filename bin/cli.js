@@ -2,8 +2,8 @@
 
 /* global module require */
 
-require('babel-register')({
-    presets: ["babel-preset-env"]
+require('@babel/register')({
+    presets: ["@babel/preset-env"]
   // ignore: /node_modules\/(?!my-tool)/
 });
 
